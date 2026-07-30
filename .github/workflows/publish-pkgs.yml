@@ -133,7 +133,7 @@ jobs:
         uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
         with:
           pkgname: ${{ steps.pkg.outputs.pkgname }}
-          assets_dir: ./pkgs/${{ matrix.package }}
+          asset_dir: ./pkgs/${{ matrix.package }}
 
           commit_username: ${{ secrets.AUR_USERNAME }}
           commit_email: ${{ secrets.AUR_EMAIL }}
