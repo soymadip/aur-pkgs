@@ -3,6 +3,7 @@ set -uo pipefail
 
 REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY not set}"
 TOKEN="${GITHUB_TOKEN:?GITHUB_TOKEN not set}"
+ASSIGNEE="${GITHUB_REPOSITORY_OWNER:-soymadip}"
 
 GH_API="https://api.github.com"
 GL_API="https://gitlab.com/api/v4"
@@ -75,6 +76,8 @@ for pkgbuild in pkgs/*/PKGBUILD; do
   fi
 
   latest=""
+  latest_url=""
+
   case "$host" in
     github)
       resp=$(curl -s -w '\n%{http_code}' \
@@ -92,7 +95,11 @@ for pkgbuild in pkgs/*/PKGBUILD; do
         overall_status=1
         continue
       fi
+      if [[ -n "$latest" ]]; then
+        latest_url="https://github.com/$owner_repo/releases/tag/$latest"
+      fi
       ;;
+
     gitlab)
       enc_repo=$(sed 's/\//%2F/g' <<< "$owner_repo")
       resp=$(curl -s -w '\n%{http_code}' "$GL_API/projects/$enc_repo/releases?per_page=1")
@@ -104,7 +111,11 @@ for pkgbuild in pkgs/*/PKGBUILD; do
         tags=$(curl -s "$GL_API/projects/$enc_repo/repository/tags?per_page=1")
         latest=$(jq -r '.[0].name // empty' <<< "$tags")
       fi
+      if [[ -n "$latest" && "$latest" != "null" ]]; then
+        latest_url="https://gitlab.com/$owner_repo/-/releases/$latest"
+      fi
       ;;
+
     gitea)
       resp=$(curl -s -w '\n%{http_code}' "https://$custom_domain/api/v1/repos/$owner_repo/releases?per_page=1")
       code=$(tail -n1 <<< "$resp"); body=$(sed '$d' <<< "$resp")
@@ -114,6 +125,9 @@ for pkgbuild in pkgs/*/PKGBUILD; do
       if [[ -z "$latest" || "$latest" == "null" ]]; then
         tags=$(curl -s "https://$custom_domain/api/v1/repos/$owner_repo/tags?per_page=1")
         latest=$(jq -r '.[0].name // empty' <<< "$tags")
+      fi
+      if [[ -n "$latest" && "$latest" != "null" ]]; then
+        latest_url="https://$custom_domain/$owner_repo/releases/tag/$latest"
       fi
       ;;
   esac
@@ -141,42 +155,62 @@ for pkgbuild in pkgs/*/PKGBUILD; do
 
   if (( is_up_to_date == 1 )); then
     echo "[OK] $pkgdirname: up to date ($curver)"
-    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | Up to date | \`$curver\` | \`$latest\` | None |" >> "$GITHUB_STEP_SUMMARY"
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | ✅ Up to date | \`$curver\` | \`$latest\` | None |" >> "$GITHUB_STEP_SUMMARY"
     continue
   fi
 
   echo "[OUTDATED] $pkgdirname: current=$curver latest=$latest"
 
   title="Update available: $pkgdirname"
-  existing=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
-    "$GH_API/repos/$REPO/issues?state=open&per_page=100" \
-    | jq -r --arg t "$title" '.[] | select(.title == $t) | .html_url' | head -n1)
 
-  if [[ -n "$existing" ]]; then
-    echo "  -> issue already open: $existing"
-    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | 🚀 Outdated | \`$curver\` | \`$latest\` | Issue open |" >> "$GITHUB_STEP_SUMMARY"
-    continue
+  # Find existing open issue for this package
+  existing_issue_number=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+    "$GH_API/repos/$REPO/issues?state=open&per_page=100" \
+    | jq -r --arg t "$title" '.[] | select(.title == $t) | .number' | head -n1)
+
+  # Close existing open issue if present
+  if [[ -n "$existing_issue_number" ]]; then
+    echo "  -> closing previous issue #$existing_issue_number..."
+    comment_body="Closing this issue as a newer upstream release (\`$latest\`) was detected."
+
+    curl -s -X POST \
+      -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+      "$GH_API/repos/$REPO/issues/$existing_issue_number/comments" \
+      -d "$(jq -n --arg b "$comment_body" '{body: $b}')" >/dev/null
+
+    curl -s -X PATCH \
+      -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+      "$GH_API/repos/$REPO/issues/$existing_issue_number" \
+      -d '{"state": "closed", "state_reason": "not_planned"}' >/dev/null
   fi
 
+  # Build body with direct link to the release page and @mention trigger
   issue_body=$(cat <<EOF
 **$pkgdirname** is out of date.
 
 - Current \`pkgver\`: \`$curver\`
-- Latest upstream ($host): [\`$latest\`](https://$custom_domain${custom_domain:+$host.com}/$owner_repo)
+- Latest upstream ($host): [\`$latest\`]($latest_url)
 - Upstream repo: $clean_url
 
-_Opened automatically by the check-updates workflow._
+---
+_cc @$ASSIGNEE — opened automatically by CI._
 EOF
 )
 
-  payload=$(jq -n --arg title "$title" --arg body "$issue_body" '{title: $title, body: $body}')
+  # Create payload with assignees field
+  payload=$(jq -n \
+    --arg title "$title" \
+    --arg body "$issue_body" \
+    --arg assignee "$ASSIGNEE" \
+    '{title: $title, body: $body, assignees: [$assignee]}')
+
   create_code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
     -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
     "$GH_API/repos/$REPO/issues" -d "$payload")
 
   if [[ "$create_code" == "201" ]]; then
-    echo "  -> opened new issue"
-    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | 🚀 Outdated | \`$curver\` | \`$latest\` | Opened issue |" >> "$GITHUB_STEP_SUMMARY"
+    echo "  -> opened new assigned issue"
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | 🚀 Outdated | \`$curver\` | \`$latest\` | Opened & assigned issue |" >> "$GITHUB_STEP_SUMMARY"
   else
     echo "  -> [WARN] failed to open issue (HTTP $create_code)"
     [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | 🚀 Outdated | \`$curver\` | \`$latest\` | Issue creation failed |" >> "$GITHUB_STEP_SUMMARY"
