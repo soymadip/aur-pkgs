@@ -1,0 +1,139 @@
+name: Publish AUR Packages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: aur-publish
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+
+    outputs:
+      packages: ${{ steps.detect.outputs.packages }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - id: detect
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            PACKAGES=$(
+              find pkgs -mindepth 1 -maxdepth 1 -type d -printf '%f\n' |
+              jq -R -s -c 'split("\n")[:-1]'
+            )
+          else
+            PACKAGES=$(
+              git diff --name-only HEAD~1 HEAD |
+              awk -F/ '/^pkgs\/[^/]+\// {print $2}' |
+              sort -u |
+              jq -R -s -c 'split("\n")[:-1]'
+            )
+          fi
+
+          echo "packages=$PACKAGES" >> "$GITHUB_OUTPUT"
+          echo "$PACKAGES"
+
+  publish:
+    needs: detect
+    runs-on: ubuntu-latest
+
+    if: needs.detect.outputs.packages != '[]' && needs.detect.outputs.packages != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.detect.outputs.packages) }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read package metadata
+        id: pkg
+        working-directory: pkgs/${{ matrix.package }}
+        shell: bash
+        run: |
+          vars=$(bash -c "
+            source PKGBUILD
+            p_name=\$(declare -p pkgname 2>/dev/null)
+            if [[ \$p_name =~ '^declare -a' ]]; then
+              p_out=\"\${pkgname[0]}\"
+            else
+              p_out=\"\$pkgname\"
+            fi
+            printf '%s\n' \"\$p_out\" \"\$pkgver\" \"\$pkgrel\"
+          ")
+
+          pkgname=$(sed -n '1p' <<< "$vars")
+          pkgver=$(sed -n '2p' <<< "$vars")
+          pkgrel=$(sed -n '3p' <<< "$vars")
+
+          echo "pkgname=$pkgname" >> "$GITHUB_OUTPUT"
+          echo "pkgver=$pkgver" >> "$GITHUB_OUTPUT"
+          echo "pkgrel=$pkgrel" >> "$GITHUB_OUTPUT"
+
+      - name: Check version against live AUR
+        id: aur_check
+        shell: bash
+        run: |
+          LOCAL_VER="${{ steps.pkg.outputs.pkgver }}-${{ steps.pkg.outputs.pkgrel }}"
+          PKG="${{ steps.pkg.outputs.pkgname }}"
+
+          AUR_VER=$(curl -s "https://aur.archlinux.org/rpc/v5/info/$PKG" | jq -r '.results[0].Version // empty')
+
+          echo "AUR version:   ${AUR_VER:-Not found / New package}"
+          echo "Local version: $LOCAL_VER"
+
+          if [[ "$AUR_VER" == "$LOCAL_VER" ]]; then
+            echo "Package $PKG is already up to date on AUR ($AUR_VER). Skipping publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate .SRCINFO
+        if: steps.aur_check.outputs.skip != 'true'
+        working-directory: pkgs/${{ matrix.package }}
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            -w /src \
+            archlinux:base-devel bash -c '
+              pacman -Syu --noconfirm --needed base-devel git pacman-contrib
+              useradd -m builduser
+              chown -R builduser:builduser /src
+              sudo -u builduser bash -c "makepkg --printsrcinfo > .SRCINFO"
+              chown -R 1001:121 .
+            '
+
+      - name: Publish to AUR
+        if: steps.aur_check.outputs.skip != 'true'
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
+        with:
+          pkgname: ${{ steps.pkg.outputs.pkgname }}
+          assets_dir: ./pkgs/${{ matrix.package }}
+
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+
+          commit_message: >-
+            Update to
+            ${{ steps.pkg.outputs.pkgver }}-${{ steps.pkg.outputs.pkgrel }}
+
+          ssh_keyscan_types: rsa,ecdsa,ed25519
+
+      - name: Trigger MyRepo Build
+        if: success() && steps.aur_check.outputs.skip != 'true'
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.REPO_ACCESS_TOKEN }}
+          repository: mydehq/my-repo
+          event-type: trigger-build
