@@ -1,6 +1,7 @@
 .SRCINFO
 src/
 pkg/
+catnap-git
 *.pkg.tar.zst
 *.tar.gz
 *.zst
