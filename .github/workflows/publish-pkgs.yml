@@ -31,12 +31,21 @@ jobs:
               jq -R -s -c 'split("\n")[:-1]'
             )
           else
-            PACKAGES=$(
-              git diff --name-only HEAD~1 HEAD |
-              awk -F/ '/^pkgs\/[^/]+\// {print $2}' |
-              sort -u |
-              jq -R -s -c 'split("\n")[:-1]'
-            )
+            # Extract changed directories and filter out deleted/missing folders
+            RAW_PKGS=$(git diff --name-only HEAD~1 HEAD | awk -F/ '/^pkgs\/[^/]+\// {print $2}' | sort -u)
+            VALID_PKGS=()
+            
+            for pkg in $RAW_PKGS; do
+              if [[ -d "pkgs/$pkg" ]]; then
+                VALID_PKGS+=("$pkg")
+              fi
+            done
+
+            if [[ ${#VALID_PKGS[@]} -eq 0 ]]; then
+              PACKAGES="[]"
+            else
+              PACKAGES=$(printf '%s\n' "${VALID_PKGS[@]}" | jq -R -s -c 'split("\n")[:-1]')
+            fi
           fi
 
           echo "packages=$PACKAGES" >> "$GITHUB_OUTPUT"
@@ -47,7 +56,7 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           if [[ "$PACKAGES" == "[]" || -z "$PACKAGES" ]]; then
-            echo "No packages were modified." >> "$GITHUB_STEP_SUMMARY"
+            echo "No valid packages were modified or existing packages found." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "$PACKAGES" | jq -r '.[] | "- `" + . + "`"' >> "$GITHUB_STEP_SUMMARY"
           fi
