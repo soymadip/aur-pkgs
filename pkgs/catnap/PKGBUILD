@@ -1,7 +1,7 @@
 # Maintainer: soymadip_1
 pkgname=catnap
 pkgver=2.1.1
-pkgrel=1
+pkgrel=2
 pkgdesc="A minimalistic and fast system fetch written in Nim."
 arch=('x86_64' 'aarch64')
 url="https://github.com/iinsertNameHere/catnap"
@@ -12,7 +12,7 @@ makedepends=('git' 'nim')
 source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
 conflicts=('catnap-git' 'catnap-bin')
 provides=("$pkgname")
-sha256sums=('f8e78f3b90534f2c47a2a44224a9cf9106f84a26938fe3d26874d2ca9edc1eb5')
+sha256sums=('SKIP')
 
 build() {
   cd "$srcdir/${pkgname}-${pkgver}"
