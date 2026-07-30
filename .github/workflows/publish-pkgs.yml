@@ -5,6 +5,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      all_packages:
+        description: 'Check & Update all packages'
+        type: boolean
+        default: true
 
 concurrency:
   group: aur-publish
@@ -25,11 +30,15 @@ jobs:
       - id: detect
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          FORCE_ALL="${{ inputs.all_packages }}"
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "$FORCE_ALL" == "true" ]]; then
+            # Run against all package directories on manual dispatch when requested
             PACKAGES=$(
               find pkgs -mindepth 1 -maxdepth 1 -type d -printf '%f\n' |
               jq -R -s -c 'split("\n")[:-1]'
             )
+
           else
             # Extract changed directories and filter out deleted/missing folders
             RAW_PKGS=$(git diff --name-only HEAD~1 HEAD | awk -F/ '/^pkgs\/[^/]+\// {print $2}' | sort -u)
@@ -52,12 +61,16 @@ jobs:
 
           # Write Step Summary
           echo "## 🔍 Packages Detected for Processing" >> "$GITHUB_STEP_SUMMARY"
-          echo "Trigger: \`${{ github.event_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Trigger: \`${{ github.event_name }}\` (Force all: \`${FORCE_ALL:-false}\`)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           if [[ "$PACKAGES" == "[]" || -z "$PACKAGES" ]]; then
+            echo "No valid packages were modified or existing packages found."
             echo "No valid packages were modified or existing packages found." >> "$GITHUB_STEP_SUMMARY"
           else
+            echo "Processing packages:"
+            echo "$PACKAGES" | jq -r '.[] | " - " + .'
+            
             echo "$PACKAGES" | jq -r '.[] | "- `" + . + "`"' >> "$GITHUB_STEP_SUMMARY"
           fi
 
