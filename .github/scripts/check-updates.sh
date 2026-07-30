@@ -10,6 +10,13 @@ GL_API="https://gitlab.com/api/v4"
 vcs_suffix_re='(-git|-hg|-bzr|-svn)$'
 overall_status=0
 
+# Prepare Step Summary Header
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+  echo "## Upstream Version Check Results" >> "$GITHUB_STEP_SUMMARY"
+  echo "| Package | Status | Local Version | Upstream Version | Action |" >> "$GITHUB_STEP_SUMMARY"
+  echo "| :--- | :--- | :--- | :--- | :--- |" >> "$GITHUB_STEP_SUMMARY"
+fi
+
 shopt -s nullglob
 for pkgbuild in pkgs/*/PKGBUILD; do
   pkgdir=$(dirname "$pkgbuild")
@@ -17,6 +24,7 @@ for pkgbuild in pkgs/*/PKGBUILD; do
 
   if [[ "$pkgdirname" =~ $vcs_suffix_re ]]; then
     echo "[SKIP] $pkgdirname: VCS package, no discrete release to track"
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | ⏭️ Skipped | N/A | N/A | VCS package |" >> "$GITHUB_STEP_SUMMARY"
     continue
   fi
 
@@ -35,6 +43,7 @@ for pkgbuild in pkgs/*/PKGBUILD; do
 
   if [[ -z "$vars" ]]; then
     echo "[WARN] $pkgdirname: failed to source PKGBUILD, skipping"
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | ⚠️ Error | N/A | N/A | Failed to source PKGBUILD |" >> "$GITHUB_STEP_SUMMARY"
     overall_status=1
     continue
   fi
@@ -45,10 +54,10 @@ for pkgbuild in pkgs/*/PKGBUILD; do
 
   if [[ -z "$url" ]]; then
     echo "[WARN] $pkgdirname: no \$url resolved from PKGBUILD, skipping"
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | ⚠️ Error | \`$curver\` | N/A | Missing \`\$url\` |" >> "$GITHUB_STEP_SUMMARY"
     continue
   fi
 
-  # Clean URL
   clean_url="${url%/}"
   clean_url="${clean_url%.git}"
 
@@ -61,6 +70,7 @@ for pkgbuild in pkgs/*/PKGBUILD; do
     host="gitea"; custom_domain="${BASH_REMATCH[1]}"; owner_repo="${BASH_REMATCH[2]}"
   else
     echo "[SKIP] $pkgdirname: \$url ($url) could not be parsed"
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | ⏭️ Skipped | \`$curver\` | N/A | Unrecognized host |" >> "$GITHUB_STEP_SUMMARY"
     continue
   fi
 
@@ -78,6 +88,7 @@ for pkgbuild in pkgs/*/PKGBUILD; do
         latest=$(jq -r '.[0].name // empty' <<< "$tags")
       else
         echo "[WARN] $pkgdirname: GitHub API error ($code) checking $owner_repo"
+        [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | ⚠️ Error | \`$curver\` | N/A | API Error HTTP $code |" >> "$GITHUB_STEP_SUMMARY"
         overall_status=1
         continue
       fi
@@ -109,25 +120,29 @@ for pkgbuild in pkgs/*/PKGBUILD; do
 
   if [[ -z "$latest" || "$latest" == "null" ]]; then
     echo "[WARN] $pkgdirname: no releases or tags found upstream ($owner_repo), skipping"
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | ⚠️ Warning | \`$curver\` | N/A | No tags/releases found |" >> "$GITHUB_STEP_SUMMARY"
     continue
   fi
 
-  # Normalize versions for comparison
-  clean_cur="${curver#*:}"   # Remove epoch if present
+  clean_cur="${curver#*:}"
   clean_cur="${clean_cur#v}"
   clean_latest="${latest#v}"
 
-  # Compare using vercmp if available, fallback to basic check
+  is_up_to_date=0
   if command -v vercmp >/dev/null 2>&1; then
     if (( $(vercmp "$clean_latest" "$clean_cur") <= 0 )); then
-      echo "[OK] $pkgdirname: up to date ($curver)"
-      continue
+      is_up_to_date=1
     fi
   else
     if [[ "$clean_cur" == "$clean_latest" ]]; then
-      echo "[OK] $pkgdirname: up to date ($curver)"
-      continue
+      is_up_to_date=1
     fi
+  fi
+
+  if (( is_up_to_date == 1 )); then
+    echo "[OK] $pkgdirname: up to date ($curver)"
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | Up to date | \`$curver\` | \`$latest\` | None |" >> "$GITHUB_STEP_SUMMARY"
+    continue
   fi
 
   echo "[OUTDATED] $pkgdirname: current=$curver latest=$latest"
@@ -139,6 +154,7 @@ for pkgbuild in pkgs/*/PKGBUILD; do
 
   if [[ -n "$existing" ]]; then
     echo "  -> issue already open: $existing"
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | 🚀 Outdated | \`$curver\` | \`$latest\` | Issue open |" >> "$GITHUB_STEP_SUMMARY"
     continue
   fi
 
@@ -149,7 +165,7 @@ for pkgbuild in pkgs/*/PKGBUILD; do
 - Latest upstream ($host): [\`$latest\`](https://$custom_domain${custom_domain:+$host.com}/$owner_repo)
 - Upstream repo: $clean_url
 
-_Opened automatically by the check-updates workflow. Close this issue once the PKGBUILD is bumped; it'll reopen if still outdated on the next run._
+_Opened automatically by the check-updates workflow._
 EOF
 )
 
@@ -160,8 +176,10 @@ EOF
 
   if [[ "$create_code" == "201" ]]; then
     echo "  -> opened new issue"
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | 🚀 Outdated | \`$curver\` | \`$latest\` | Opened issue |" >> "$GITHUB_STEP_SUMMARY"
   else
     echo "  -> [WARN] failed to open issue (HTTP $create_code)"
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | 🚀 Outdated | \`$curver\` | \`$latest\` | Issue creation failed |" >> "$GITHUB_STEP_SUMMARY"
     overall_status=1
   fi
 done

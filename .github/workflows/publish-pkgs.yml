@@ -40,7 +40,17 @@ jobs:
           fi
 
           echo "packages=$PACKAGES" >> "$GITHUB_OUTPUT"
-          echo "$PACKAGES"
+
+          # Write Step Summary
+          echo "## 🔍 Packages Detected for Processing" >> "$GITHUB_STEP_SUMMARY"
+          echo "Trigger: \`${{ github.event_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$PACKAGES" == "[]" || -z "$PACKAGES" ]]; then
+            echo "No packages were modified." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "$PACKAGES" | jq -r '.[] | "- `" + . + "`"' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   publish:
     needs: detect
@@ -94,6 +104,11 @@ jobs:
           if [[ "$AUR_VER" == "$LOCAL_VER" ]]; then
             echo "Package $PKG is already up to date on AUR ($AUR_VER). Skipping publish."
             echo "skip=true" >> "$GITHUB_OUTPUT"
+
+            echo "### Package Status: \`${{ matrix.package }}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Package | Local Version | Live AUR Version | Action |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| :--- | :--- | :--- | :--- |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| \`$PKG\` | \`$LOCAL_VER\` | \`$AUR_VER\` | **Skipped** (Up-to-date) |" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
@@ -129,6 +144,18 @@ jobs:
             ${{ steps.pkg.outputs.pkgver }}-${{ steps.pkg.outputs.pkgrel }}
 
           ssh_keyscan_types: rsa,ecdsa,ed25519
+
+      - name: Summary for published package
+        if: steps.aur_check.outputs.skip != 'true' && success()
+        shell: bash
+        run: |
+          LOCAL_VER="${{ steps.pkg.outputs.pkgver }}-${{ steps.pkg.outputs.pkgrel }}"
+          PKG="${{ steps.pkg.outputs.pkgname }}"
+
+          echo "### Package Status: \`${{ matrix.package }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Package | New Version | Action |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| :--- | :--- | :--- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`$PKG\` | \`$LOCAL_VER\` | **Published to AUR** |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Trigger MyRepo Build
         if: success() && steps.aur_check.outputs.skip != 'true'
