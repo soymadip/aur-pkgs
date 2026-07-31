@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       all_packages:
-        description: 'Check & Update all packages'
+        description: "Check & Update all packages"
         type: boolean
         default: true
 
@@ -43,7 +43,7 @@ jobs:
             # Extract changed directories and filter out deleted/missing folders
             RAW_PKGS=$(git diff --name-only HEAD~1 HEAD | awk -F/ '/^pkgs\/[^/]+\// {print $2}' | sort -u)
             VALID_PKGS=()
-            
+
             for pkg in $RAW_PKGS; do
               if [[ -d "pkgs/$pkg" ]]; then
                 VALID_PKGS+=("$pkg")
@@ -70,7 +70,7 @@ jobs:
           else
             echo "Processing packages:"
             echo "$PACKAGES" | jq -r '.[] | " - " + .'
-            
+
             echo "$PACKAGES" | jq -r '.[] | "- `" + . + "`"' >> "$GITHUB_STEP_SUMMARY"
           fi
 
