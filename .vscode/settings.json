@@ -1,0 +1,3 @@
+{
+    "shfmt.executablePath": "${userHome}/.local/share/mise/installs/shfmt/latest/shfmt"
+}
