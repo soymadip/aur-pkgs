@@ -58,6 +58,16 @@ close_update_issue() {
 		-d "$(jq -n --arg reason "$reason" '{state: "closed", state_reason: $reason}')" >/dev/null
 }
 
+comment_on_issue() {
+	local issue_number="$1"
+	local comment_body="$2"
+
+	curl -fsS -X POST \
+		-H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+		"$GH_API/repos/$REPO/issues/$issue_number/comments" \
+		-d "$(jq -n --arg b "$comment_body" '{body: $b}')" >/dev/null
+}
+
 # Prepare Step Summary Header
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 	echo "## Upstream Version Check Results" >>"$GITHUB_STEP_SUMMARY"
@@ -235,6 +245,24 @@ for pkgbuild in pkgs/*/PKGBUILD; do
 	echo "[OUTDATED] $pkgdirname: current=$curver latest=$latest"
 
 	title="Update available: $pkgdirname"
+	issue_body=$(
+		cat <<EOF
+**$pkgdirname** is out of date.
+
+- Current \`pkgver\`: \`$curver\`
+- Latest upstream ($host): [\`$latest\`]($latest_url)
+- Upstream repo: $clean_url
+
+---
+_Opened automatically by CI._
+EOF
+	)
+
+	payload=$(jq -n \
+		--arg title "$title" \
+		--arg body "$issue_body" \
+		--arg assignee "$ASSIGNEE" \
+		'{title: $title, body: $body, assignees: [$assignee]}')
 
 	# Find existing open issue for this package
 	existing_issue=$(find_open_update_issues "$pkgdirname" | head -n1)
@@ -251,36 +279,26 @@ for pkgbuild in pkgs/*/PKGBUILD; do
 			continue
 		fi
 
-		# Issue exists but is for an older upstream version, close it before opening a new one
-		echo "  -> closing previous issue #$existing_issue_number for older version..."
-		comment_body="Closing this issue as a newer upstream release (\`$latest\`) was detected."
+		# Update the existing issue in place when a newer upstream version is found.
+		echo "  -> updating issue #$existing_issue_number to version $latest..."
+		update_code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
+			-H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+			"$GH_API/repos/$REPO/issues/$existing_issue_number" -d "$payload")
 
-		if ! close_update_issue "$existing_issue_number" not_planned "$comment_body"; then
-			echo "[WARN] failed to close issue #$existing_issue_number" >&2
+		if [[ "$update_code" == "200" ]]; then
+			comment_body="@$ASSIGNEE, \`$pkgdirname\` has a new upstream version \`$latest\`."
+			if ! comment_on_issue "$existing_issue_number" "$comment_body"; then
+				echo "[WARN] failed to comment on issue #$existing_issue_number" >&2
+				overall_status=1
+			fi
+			[[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | 🚀 Outdated | \`$curver\` | \`$latest\` | Updated issue #$existing_issue_number |" >>"$GITHUB_STEP_SUMMARY"
+		else
+			echo "[WARN] failed to update issue #$existing_issue_number (HTTP $update_code)" >&2
+			[[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | 🚀 Outdated | \`$curver\` | \`$latest\` | Issue update failed |" >>"$GITHUB_STEP_SUMMARY"
 			overall_status=1
 		fi
+		continue
 	fi
-
-	# Build body with direct link to the release page and @mention trigger
-	issue_body=$(
-		cat <<EOF
-**$pkgdirname** is out of date.
-
-- Current \`pkgver\`: \`$curver\`
-- Latest upstream ($host): [\`$latest\`]($latest_url)
-- Upstream repo: $clean_url
-
----
-_cc @$ASSIGNEE — opened automatically by CI._
-EOF
-	)
-
-	# Create payload with assignees field
-	payload=$(jq -n \
-		--arg title "$title" \
-		--arg body "$issue_body" \
-		--arg assignee "$ASSIGNEE" \
-		'{title: $title, body: $body, assignees: [$assignee]}')
 
 	create_code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
 		-H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
