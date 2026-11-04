@@ -92,20 +92,20 @@ jobs:
         working-directory: pkgs/${{ matrix.package }}
         shell: bash
         run: |
-          vars=$(bash -c "
-            source PKGBUILD
-            p_name=\$(declare -p pkgname 2>/dev/null)
-            if [[ \$p_name =~ '^declare -a' ]]; then
-              p_out=\"\${pkgname[0]}\"
-            else
-              p_out=\"\$pkgname\"
-            fi
-            printf '%s\n' \"\$p_out\" \"\$pkgver\" \"\$pkgrel\"
-          ")
+          metadata=$(docker run --rm \
+            -v "$PWD:/src" \
+            -w /src \
+            archlinux:base-devel bash -c '
+              useradd -m metadatauser
+              chown -R metadatauser:metadatauser /src
+              runuser -u metadatauser -- makepkg --printsrcinfo
+            ')
 
-          pkgname=$(sed -n '1p' <<< "$vars")
-          pkgver=$(sed -n '2p' <<< "$vars")
-          pkgrel=$(sed -n '3p' <<< "$vars")
+          pkgname=$(awk '$1 == "pkgname" { print $3; exit }' <<< "$metadata")
+          pkgver=$(awk '$1 == "pkgver" { print $3; exit }' <<< "$metadata")
+          pkgrel=$(awk '$1 == "pkgrel" { print $3; exit }' <<< "$metadata")
+
+          [[ -n "$pkgname" && -n "$pkgver" && -n "$pkgrel" ]]
 
           echo "pkgname=$pkgname" >> "$GITHUB_OUTPUT"
           echo "pkgver=$pkgver" >> "$GITHUB_OUTPUT"
@@ -135,7 +135,7 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Generate .SRCINFO
+      - name: Build package and generate .SRCINFO
         if: steps.aur_check.outputs.skip != 'true'
         working-directory: pkgs/${{ matrix.package }}
         run: |
@@ -143,12 +143,21 @@ jobs:
             -v "$PWD:/src" \
             -w /src \
             archlinux:base-devel bash -c '
-              pacman -Syu --noconfirm --needed base-devel git pacman-contrib
+              pacman -Syu --noconfirm --needed base-devel git pacman-contrib sudo
               useradd -m builduser
+              echo "builduser ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builduser
+              chmod 440 /etc/sudoers.d/builduser
               chown -R builduser:builduser /src
               sudo -u builduser bash -c "makepkg --printsrcinfo > .SRCINFO"
-              chown -R 1001:121 .
-            '
+              sudo -u builduser bash -c "makepkg --syncdeps --noconfirm --cleanbuild --clean"
+              test -n "\$(find . -maxdepth 1 -type f -name "*.pkg.tar.*" -print -quit)"
+              chown -R 1001:121 /src
+          '
+
+      - name: Remove build artifacts
+        if: steps.aur_check.outputs.skip != 'true'
+        working-directory: pkgs/${{ matrix.package }}
+        run: rm -f ./*.pkg.tar.* ./*.src.tar.* ./*.log
 
       - name: Publish to AUR
         if: steps.aur_check.outputs.skip != 'true'
