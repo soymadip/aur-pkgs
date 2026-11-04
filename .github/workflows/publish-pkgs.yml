@@ -135,12 +135,23 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Cache Arch packages
+        if: steps.aur_check.outputs.skip != 'true'
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/pacman-cache
+          key: pacman-archlinux-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: |
+            pacman-archlinux-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Build package and generate .SRCINFO
         if: steps.aur_check.outputs.skip != 'true'
         working-directory: pkgs/${{ matrix.package }}
         run: |
+          mkdir -p "$RUNNER_TEMP/pacman-cache"
           docker run --rm \
             -v "$PWD:/src" \
+            -v "$RUNNER_TEMP/pacman-cache:/var/cache/pacman/pkg" \
             -w /src \
             archlinux:base-devel bash -c '
               pacman -Syu --noconfirm --needed base-devel git pacman-contrib sudo
