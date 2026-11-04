@@ -157,7 +157,10 @@ jobs:
       - name: Remove build artifacts
         if: steps.aur_check.outputs.skip != 'true'
         working-directory: pkgs/${{ matrix.package }}
-        run: rm -f ./*.pkg.tar.* ./*.src.tar.* ./*.log
+        run: |
+          cp .SRCINFO "$RUNNER_TEMP/${{ matrix.package }}.SRCINFO"
+          git clean -fdx -- .
+          cp "$RUNNER_TEMP/${{ matrix.package }}.SRCINFO" .SRCINFO
 
       - name: Publish to AUR
         if: steps.aur_check.outputs.skip != 'true'
