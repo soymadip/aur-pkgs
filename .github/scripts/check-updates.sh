@@ -68,6 +68,33 @@ comment_on_issue() {
 		-d "$(jq -n --arg b "$comment_body" '{body: $b}')" >/dev/null
 }
 
+issue_has_skip_marker() {
+	local issue_number="$1"
+	local issue_body="$2"
+	local comments
+	local marker_re='(^|[[:space:]])#?[[:space:]]*ci:[[:space:]]*skip-update([[:space:]]|$)'
+
+	if grep -Eq "$marker_re" <<<"$issue_body"; then
+		return 0
+	fi
+
+	if ! comments=$(curl -fsS \
+		-H "Authorization: Bearer $TOKEN" \
+		-H "Accept: application/vnd.github+json" \
+		"$GH_API/repos/$REPO/issues/$issue_number/comments?per_page=100"); then
+		echo "[WARN] failed to read comments for issue #$issue_number" >&2
+		return 2
+	fi
+
+	if ! jq -e 'type == "array"' >/dev/null <<<"$comments"; then
+		echo "[WARN] GitHub returned invalid comments for issue #$issue_number" >&2
+		return 2
+	fi
+
+	jq -e --arg marker_re "$marker_re" \
+		'any(.[]; (.body // "" | test($marker_re)))' >/dev/null <<<"$comments"
+}
+
 # Prepare Step Summary Header
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 	echo "## Upstream Version Check Results" >>"$GITHUB_STEP_SUMMARY"
@@ -83,6 +110,12 @@ for pkgbuild in pkgs/*/PKGBUILD; do
 	if [[ "$pkgdirname" =~ $vcs_suffix_re ]]; then
 		echo "[SKIP] $pkgdirname: VCS package, no discrete release to track"
 		[[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | ⏭️ Skipped | N/A | N/A | VCS package |" >>"$GITHUB_STEP_SUMMARY"
+		continue
+	fi
+
+	if grep -Eq '^[[:space:]]*#[[:space:]]*ci:[[:space:]]*skip-update([[:space:]]|$)' "$pkgbuild"; then
+		echo "[SKIP] $pkgdirname: update checks disabled by PKGBUILD marker"
+		[[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | ⏭️ Skipped | N/A | N/A | \`# ci: skip-update\` marker |" >>"$GITHUB_STEP_SUMMARY"
 		continue
 	fi
 
@@ -226,6 +259,18 @@ for pkgbuild in pkgs/*/PKGBUILD; do
 		while IFS= read -r existing_issue; do
 			[[ -z "$existing_issue" ]] && continue
 			existing_number=$(jq -r '.number' <<<"$existing_issue")
+		existing_body=$(jq -r '.body // ""' <<<"$existing_issue")
+		marker_status=0
+		if issue_has_skip_marker "$existing_number" "$existing_body"; then
+			echo "  -> leaving issue #$existing_number open due to skip marker"
+			continue
+		else
+			marker_status=$?
+			if ((marker_status == 2)); then
+				overall_status=1
+				continue
+			fi
+		fi
 			echo "  -> closing resolved issue #$existing_number..."
 			comment_body="Package \`$pkgdirname\` has been updated to \`$curver\`. Closing issue."
 			if ! close_update_issue "$existing_number" completed "$comment_body"; then
@@ -271,6 +316,18 @@ EOF
 		existing_issue_number=$(jq -r '.number' <<<"$existing_issue")
 		existing_issue_body=$(jq -r '.body // ""' <<<"$existing_issue")
 		existing_issue_title=$(jq -r '.title // ""' <<<"$existing_issue")
+		marker_status=0
+		if issue_has_skip_marker "$existing_issue_number" "$existing_issue_body"; then
+			echo "  -> leaving issue #$existing_issue_number open due to skip marker"
+			[[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | ⏭️ Skipped | \`$curver\` | \`$latest\` | Issue #$existing_issue_number has skip marker |" >>"$GITHUB_STEP_SUMMARY"
+			continue
+		else
+			marker_status=$?
+			if ((marker_status == 2)); then
+				overall_status=1
+				continue
+			fi
+		fi
 
 		# If open issue already exists for this package version, skip creating a duplicate
 		if [[ "$existing_issue_body" == *"$latest"* || "$existing_issue_title" == *"$latest"* ]]; then

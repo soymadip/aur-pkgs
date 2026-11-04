@@ -11,6 +11,7 @@
 
 For compiled packages, add [mydehq Repository](https://mydehq.github.io/my-repo/) to your system, then install with `pacman` (or your preferred package manager)
 
+
 ### AUR
 
 Or directly from the AUR, you can use an AUR helper like `yay` or `paru`. Here are the commands for both:
