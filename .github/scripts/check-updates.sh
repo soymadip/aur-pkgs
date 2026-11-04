@@ -11,6 +11,53 @@ GL_API="https://gitlab.com/api/v4"
 vcs_suffix_re='(-git|-hg|-bzr|-svn)$'
 overall_status=0
 
+find_open_update_issues() {
+	local pkg="$1"
+	local page=1
+	local response
+	local issue_count
+
+	while :; do
+		if ! response=$(curl -fsS \
+			-H "Authorization: Bearer $TOKEN" \
+			-H "Accept: application/vnd.github+json" \
+			"$GH_API/repos/$REPO/issues?state=open&per_page=100&page=$page"); then
+			echo "[WARN] failed to list open issues while checking $pkg" >&2
+			return 1
+		fi
+
+		if ! jq -e 'type == "array"' >/dev/null <<<"$response"; then
+			echo "[WARN] GitHub returned an invalid issue list while checking $pkg" >&2
+			return 1
+		fi
+
+		jq -c --arg pkg "$pkg" '.[] |
+			select(.pull_request == null and
+				(.title == ("Update available: " + $pkg) or
+				 (.title | startswith("Update available: " + $pkg + " ")) or
+				 (.title | startswith("Update available: " + $pkg + "("))))' <<<"$response"
+
+		issue_count=$(jq 'length' <<<"$response")
+		((issue_count < 100)) && break
+		((page++))
+	done
+}
+
+close_update_issue() {
+	local issue_number="$1"
+	local reason="$2"
+	local comment_body="$3"
+
+	curl -fsS -X POST \
+		-H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+		"$GH_API/repos/$REPO/issues/$issue_number/comments" \
+		-d "$(jq -n --arg b "$comment_body" '{body: $b}')" >/dev/null &&
+	curl -fsS -X PATCH \
+		-H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+		"$GH_API/repos/$REPO/issues/$issue_number" \
+		-d "$(jq -n --arg reason "$reason" '{state: "closed", state_reason: $reason}')" >/dev/null
+}
+
 # Prepare Step Summary Header
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 	echo "## Upstream Version Check Results" >>"$GITHUB_STEP_SUMMARY"
@@ -163,28 +210,25 @@ for pkgbuild in pkgs/*/PKGBUILD; do
 	if ((is_up_to_date == 1)); then
 		echo "[OK] $pkgdirname: up to date ($curver)"
 
-		# Close any open update issue for this package since it is up to date
-		existing_issue=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
-			"$GH_API/repos/$REPO/issues?state=open&per_page=100" |
-			jq -c --arg pkg "$pkgdirname" '.[] | select(.pull_request == null and (.title == ("Update available: " + $pkg) or (.title | startswith("Update available: " + $pkg + " ")) or (.title | startswith("Update available: " + $pkg + "("))))' | head -n1)
-
-		if [[ -n "$existing_issue" ]]; then
+		# Close every open update issue for this package since it is up to date.
+		closed_issue_count=0
+		existing_issues=$(find_open_update_issues "$pkgdirname") || overall_status=1
+		while IFS= read -r existing_issue; do
+			[[ -z "$existing_issue" ]] && continue
 			existing_number=$(jq -r '.number' <<<"$existing_issue")
 			echo "  -> closing resolved issue #$existing_number..."
 			comment_body="Package \`$pkgdirname\` has been updated to \`$curver\`. Closing issue."
+			if ! close_update_issue "$existing_number" completed "$comment_body"; then
+				echo "[WARN] failed to close issue #$existing_number" >&2
+				overall_status=1
+			else
+				((closed_issue_count++))
+			fi
+		done <<<"$existing_issues"
 
-			curl -s -X POST \
-				-H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
-				"$GH_API/repos/$REPO/issues/$existing_number/comments" \
-				-d "$(jq -n --arg b "$comment_body" '{body: $b}')" >/dev/null
-
-			curl -s -X PATCH \
-				-H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
-				"$GH_API/repos/$REPO/issues/$existing_number" \
-				-d '{"state": "closed", "state_reason": "completed"}' >/dev/null
-		fi
-
-		[[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | ✅ Up to date | \`$curver\` | \`$latest\` | None |" >>"$GITHUB_STEP_SUMMARY"
+		action="None"
+		((closed_issue_count > 0)) && action="Closed $closed_issue_count issue(s)"
+		[[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "| \`$pkgdirname\` | ✅ Up to date | \`$curver\` | \`$latest\` | $action |" >>"$GITHUB_STEP_SUMMARY"
 		continue
 	fi
 
@@ -193,9 +237,7 @@ for pkgbuild in pkgs/*/PKGBUILD; do
 	title="Update available: $pkgdirname"
 
 	# Find existing open issue for this package
-	existing_issue=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
-		"$GH_API/repos/$REPO/issues?state=open&per_page=100" |
-		jq -c --arg pkg "$pkgdirname" '.[] | select(.pull_request == null and (.title == ("Update available: " + $pkg) or (.title | startswith("Update available: " + $pkg + " ")) or (.title | startswith("Update available: " + $pkg + "("))))' | head -n1)
+	existing_issue=$(find_open_update_issues "$pkgdirname" | head -n1)
 
 	if [[ -n "$existing_issue" ]]; then
 		existing_issue_number=$(jq -r '.number' <<<"$existing_issue")
@@ -213,15 +255,10 @@ for pkgbuild in pkgs/*/PKGBUILD; do
 		echo "  -> closing previous issue #$existing_issue_number for older version..."
 		comment_body="Closing this issue as a newer upstream release (\`$latest\`) was detected."
 
-		curl -s -X POST \
-			-H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
-			"$GH_API/repos/$REPO/issues/$existing_issue_number/comments" \
-			-d "$(jq -n --arg b "$comment_body" '{body: $b}')" >/dev/null
-
-		curl -s -X PATCH \
-			-H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
-			"$GH_API/repos/$REPO/issues/$existing_issue_number" \
-			-d '{"state": "closed", "state_reason": "not_planned"}' >/dev/null
+		if ! close_update_issue "$existing_issue_number" not_planned "$comment_body"; then
+			echo "[WARN] failed to close issue #$existing_issue_number" >&2
+			overall_status=1
+		fi
 	fi
 
 	# Build body with direct link to the release page and @mention trigger
